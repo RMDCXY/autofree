@@ -1,12 +1,15 @@
 #include <iostream>
 #include <string>
 #include <cstdio>
+#include <cstdlib>
+#include <filesystem>
 #include <unistd.h>
 #include <sys/types.h>
 #include <sys/wait.h>
-#include <cstdlib>
+#include <pwd.h>
 #include <chrono>
 #include <thread>
+#include <limits.h>
 
 // 检查 root 权限
 bool hasRootPrivilege() {
@@ -38,10 +41,102 @@ std::string executeCommand(const std::string& cmd, int& exitCode) {
     return output;
 }
 
+bool isCdCommand(const std::string& cmd) {
+    return cmd == "cd" || cmd.rfind("cd ", 0) == 0 || cmd.rfind("cd\t", 0) == 0;
+}
+
+bool changeDirectory(const std::string& cmd, std::filesystem::path& previousDirectory,
+                     std::string& error) {
+    std::string argument = cmd.substr(2);
+    const std::size_t first = argument.find_first_not_of(" \t");
+    std::filesystem::path target;
+    if (first == std::string::npos) {
+        const char* home = std::getenv("HOME");
+        if (home == nullptr || *home == '\0') {
+            error = "cd: HOME not set";
+            return false;
+        }
+        target = std::filesystem::u8path(home);
+    } else {
+        argument.erase(0, first);
+        if (argument.front() == '"' || argument.front() == '\'') {
+            const char quote = argument.front();
+            const std::size_t endQuote = argument.find(quote, 1);
+            if (endQuote == std::string::npos ||
+                argument.find_first_not_of(" \t", endQuote + 1) != std::string::npos) {
+                error = "cd: invalid path";
+                return false;
+            }
+            argument = argument.substr(1, endQuote - 1);
+        }
+
+        if (argument == "-") {
+            if (previousDirectory.empty()) {
+                error = "cd: OLDPWD not set";
+                return false;
+            }
+            target = previousDirectory;
+        } else {
+            const char* home = std::getenv("HOME");
+            if (home != nullptr &&
+                (argument == "~" || argument.rfind("~/", 0) == 0)) {
+                argument.replace(0, 1, home);
+            }
+            target = std::filesystem::u8path(argument);
+        }
+    }
+
+    std::error_code ec;
+    const std::filesystem::path oldDirectory = std::filesystem::current_path(ec);
+    if (ec) {
+        error = "cd: " + ec.message();
+        return false;
+    }
+    std::filesystem::current_path(target, ec);
+    if (ec) {
+        error = "cd: " + ec.message();
+        return false;
+    }
+    previousDirectory = oldDirectory;
+    if (argument == "-" && first != std::string::npos) {
+        std::cout << std::filesystem::current_path().u8string() << std::endl;
+    }
+    return true;
+}
+
+void printPrompt(const std::filesystem::path& homeDirectory) {
+    const passwd* userInfo = getpwuid(geteuid());
+    const char* userEnv = std::getenv("USER");
+    const std::string username = userEnv != nullptr && *userEnv != '\0'
+        ? userEnv
+        : (userInfo != nullptr ? userInfo->pw_name : "user");
+    char hostname[HOST_NAME_MAX + 1] = {};
+    if (gethostname(hostname, sizeof(hostname) - 1) != 0) {
+        hostname[0] = '\0';
+    }
+
+    std::error_code ec;
+    std::filesystem::path currentDirectory = std::filesystem::current_path(ec);
+    std::string displayedDirectory = ec ? "?" : currentDirectory.u8string();
+    const std::string home = homeDirectory.u8string();
+    if (!home.empty() && displayedDirectory == home) {
+        displayedDirectory = "~";
+    } else if (!home.empty() && displayedDirectory.rfind(home + "/", 0) == 0) {
+        displayedDirectory.replace(0, home.size(), "~");
+    }
+
+    std::cout << "\033[1;32m" << username << "@" << hostname
+              << "\033[0m:\033[1;94m" << displayedDirectory
+              << "\033[0m$ ";
+}
+
 int main() {
     const int err_limit = 3;
     int err_count = 0;
     std::string last_output;
+    std::filesystem::path previousDirectory;
+    const char* home = std::getenv("HOME");
+    const std::filesystem::path homeDirectory = home != nullptr ? std::filesystem::u8path(home) : "";
 
     // 权限检查
     if (!hasRootPrivilege()) {
@@ -53,7 +148,7 @@ int main() {
     std::cout << "键入 `autofree_help` 以获得帮助。" << std::endl;
 
     while (true) {
-        std::cout << "\033[32m$ \033[0m";   // 绿色提示符
+        printPrompt(homeDirectory);
         std::string cmd;
         std::getline(std::cin, cmd);
 
@@ -67,7 +162,18 @@ int main() {
 
         // 执行普通命令
         int exitCode = 0;
-        last_output = executeCommand(cmd, exitCode);
+        if (isCdCommand(cmd)) {
+            std::string error;
+            if (!changeDirectory(cmd, previousDirectory, error)) {
+                exitCode = 1;
+                last_output = error + "\n";
+                std::cerr << error << std::endl;
+            } else {
+                last_output.clear();
+            }
+        } else {
+            last_output = executeCommand(cmd, exitCode);
+        }
 
         // 命令报错（退出码非0）
         if (exitCode != 0) {
@@ -77,7 +183,6 @@ int main() {
 
         // 免费逻辑
         if (err_count == err_limit) {
-            std::cout << last_output;
             std::cout << "\033[31m您当前似乎是非常愤怒的，即将帮助您自动免费计算机。\033[0m" << std::endl;
             std::cout << "\033[33m这是您的最后机会！在3秒内按下Ctrl+C可以避免免费。\033[0m" << std::endl;
             std::this_thread::sleep_for(std::chrono::seconds(3));

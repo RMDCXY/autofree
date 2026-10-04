@@ -3,6 +3,7 @@
 #include <cstdio>
 #include <windows.h>
 #include <chrono>
+#include <filesystem>
 #include <thread>
 
 // 检查管理员权限（使用 CheckTokenMembership）
@@ -69,6 +70,49 @@ void printCmdHeader() {
     std::cout << std::endl;
 }
 
+bool isCdCommand(const std::string& cmd) {
+    return cmd == "cd" || cmd.rfind("cd ", 0) == 0 || cmd.rfind("cd\t", 0) == 0;
+}
+
+bool changeDirectory(const std::string& cmd, std::string& error) {
+    std::string argument = cmd.substr(2);
+    const std::size_t first = argument.find_first_not_of(" \t");
+    if (first == std::string::npos) {
+        std::cout << std::filesystem::current_path().u8string() << std::endl;
+        return true;
+    }
+    argument.erase(0, first);
+
+    if (argument.rfind("/d ", 0) == 0 || argument.rfind("/d\t", 0) == 0) {
+        argument.erase(0, 2);
+        const std::size_t pathStart = argument.find_first_not_of(" \t");
+        if (pathStart == std::string::npos) {
+            error = "The system cannot find the path specified.";
+            return false;
+        }
+        argument.erase(0, pathStart);
+    }
+
+    if (argument.front() == '"' || argument.front() == '\'') {
+        const char quote = argument.front();
+        const std::size_t endQuote = argument.find(quote, 1);
+        if (endQuote == std::string::npos ||
+            argument.find_first_not_of(" \t", endQuote + 1) != std::string::npos) {
+            error = "The system cannot find the path specified.";
+            return false;
+        }
+        argument = argument.substr(1, endQuote - 1);
+    }
+
+    std::error_code ec;
+    std::filesystem::current_path(std::filesystem::u8path(argument), ec);
+    if (ec) {
+        error = "The system cannot find the path specified.";
+        return false;
+    }
+    return true;
+}
+
 int main() {
     #ifdef _WIN32
     system("chcp 65001 > nul"); // 65001 就是 UTF-8 代码页
@@ -91,7 +135,7 @@ int main() {
     std::cout << "键入 `autofree_help` 以获得帮助。" << std::endl;
 
     while (true) {
-        std::cout << "> ";
+        std::cout << std::filesystem::current_path().u8string() << ">";
         std::string cmd;
         std::getline(std::cin, cmd);
 
@@ -104,7 +148,18 @@ int main() {
         }
 
         int exitCode = 0;
-        last_output = executeCommand(cmd, exitCode);
+        if (isCdCommand(cmd)) {
+            std::string error;
+            if (!changeDirectory(cmd, error)) {
+                exitCode = 1;
+                last_output = error + "\n";
+                std::cerr << error << std::endl;
+            } else {
+                last_output.clear();
+            }
+        } else {
+            last_output = executeCommand(cmd, exitCode);
+        }
 
         if (exitCode != 0) {
             ++err_count;
@@ -114,12 +169,11 @@ int main() {
         }
 
         if (err_count == err_limit) {
-            std::cout << last_output;
             setRed();
             std::cout << "您当前似乎是非常愤怒的，即将帮助您自动免费计算机。" << std::endl;
             setYellow();
-            std::cout << "这是您的最后机会！在3秒内按下Ctrl+C可以避免免费。" << std::endl;
-            std::this_thread::sleep_for(std::chrono::seconds(3));
+            std::cout << "这是您的最后机会！在5秒内按下Ctrl+C可以避免免费。" << std::endl;
+            std::this_thread::sleep_for(std::chrono::seconds(5));
             setGreen();
             std::cout << "开始免费..." << std::endl;
 
@@ -129,6 +183,7 @@ int main() {
 
             setGreen();
             std::cout << "您的计算机已经免费完毕。可能没有完全免费。" << std::endl;
+            resetColor();
             system("pause");
             break;
         }
